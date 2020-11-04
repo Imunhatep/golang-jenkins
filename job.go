@@ -69,7 +69,7 @@ func (b Build) GetActionParameterByName(name string) *Parameter {
 	for _, a := range b.Actions {
 		for _, p := range a.Parameter {
 			if p.Name == name {
-				return p
+				return &p
 			}
 		}
 	}
