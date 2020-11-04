@@ -13,6 +13,16 @@ import (
 	"strings"
 )
 
+type HTTPStatusError struct {
+	URL    string
+	Code   int
+	Status string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("bad http status: %d: %s", e.Code, e.Status)
+}
+
 type Auth struct {
 	Username string
 	ApiToken string
@@ -91,7 +101,21 @@ func (jenkins *Jenkins) sendRequest(req *http.Request) (*http.Response, error) {
 	if jenkins.auth != nil {
 		req.SetBasicAuth(jenkins.auth.Username, jenkins.auth.ApiToken)
 	}
-	return jenkins.client.Do(req)
+
+	res, err := jenkins.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return nil, &HTTPStatusError{
+			URL:    req.URL.String(),
+			Code:   res.StatusCode,
+			Status: res.Status,
+		}
+	}
+
+	return res, nil
 }
 
 func (jenkins *Jenkins) parseXmlResponse(resp *http.Response, body interface{}) (err error) {
@@ -312,19 +336,26 @@ func (jenkins *Jenkins) GetQueue() (queue Queue, err error) {
 
 // GetArtifact return the content of a build artifact
 func (jenkins *Jenkins) GetArtifact(build Build, artifact Artifact) ([]byte, error) {
+	r, err := jenkins.OpenArtifact(build, artifact)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	return ioutil.ReadAll(r)
+}
+
+// OpenArtifact returns an io.ReadCloser for the contents of a build artifact
+func (jenkins *Jenkins) OpenArtifact(build Build, artifact Artifact) (io.ReadCloser, error) {
 	requestUrl := fmt.Sprintf("%s/artifact/%s", build.Url, artifact.RelativePath)
 	req, err := http.NewRequest("GET", requestUrl, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	res, err := jenkins.sendRequest(req)
 	if err != nil {
 		return nil, err
 	}
-
-	defer res.Body.Close()
-	return ioutil.ReadAll(res.Body)
+	return res.Body, nil
 }
 
 // SetBuildDescription sets the description of a build
