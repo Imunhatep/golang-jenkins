@@ -1,4 +1,4 @@
-module github.com/Imunhatep/golang-jenkins
+module github.com/imunhatep/golang-jenkins
 
 go 1.14
 
