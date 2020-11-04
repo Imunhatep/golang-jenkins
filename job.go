@@ -2,6 +2,10 @@ package gojenkins
 
 import (
 	"encoding/xml"
+	"fmt"
+
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
 )
 
 type Artifact struct {
@@ -80,6 +84,12 @@ type QueueItem struct {
 	Why          string `json:"why"`
 }
 
+type JobItem struct {
+	XMLName         struct{}         `xml:"item"`
+	MavenJobItem    *MavenJobItem    `xml:"maven2-moduleset"`
+	PipelineJobItem *PipelineJobItem `xml:"flow-definition"`
+}
+
 type Job struct {
 	Actions []Action `json:"actions"`
 	Name    string   `json:"name"`
@@ -105,6 +115,25 @@ type Job struct {
 	QueueItem QueueItem `json:"queueItem"`
 
 	Property []Property `json:"property"`
+}
+
+type PipelineJobItem struct {
+	XMLName struct{} `xml:"flow-definition"`
+	/*
+		Plugin                           string               `xml:"plugin,attr"`
+	*/
+	Actions          string             `xml:"actions"`
+	Description      string             `xml:"description"`
+	KeepDependencies string             `xml:"keepDependencies"`
+	Properties       JobProperties      `xml:"properties"`
+	Definition       PipelineDefinition `xml:"definition"`
+	Triggers         Triggers           `xml:"triggers"`
+}
+
+type PipelineDefinition struct {
+	Scm        Scm    `xml:"scm"`
+	ScriptPath string `xml:"scriptPath"`
+	Script     string `xml:"script"`
 }
 
 type SubJobDescription struct {
@@ -303,6 +332,63 @@ func (iscm *Scm) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 		if err != nil {
 			return err
 		}
+	default:
+		log.Error().Msgf("unrecognised SCM class %s", iscm.Class)
 	}
 	return nil
+}
+
+//MarshalXML implements xml.MarshalXML interface
+//Encodes the multiple types of Scm
+func (iscm *Scm) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	scmContent := iscm.ScmContent
+	switch s := scmContent.(type) {
+	case *ScmGit:
+		start.Attr = append(start.Attr, xml.Attr{
+			Name: xml.Name{
+				Local: "class",
+			},
+			Value: "hudson.plugins.git.GitSCM",
+		})
+		start.Attr = append(start.Attr, xml.Attr{
+			Name: xml.Name{
+				Local: "plugin",
+			},
+			Value: "git@2.4.0",
+		})
+		err := e.EncodeElement(s, start)
+		if err != nil {
+			return err
+		}
+	case *ScmSvn:
+		start.Attr = append(start.Attr, xml.Attr{
+			Name: xml.Name{
+				Local: "class",
+			},
+			Value: "hudson.scm.SubversionSCM",
+		})
+		start.Attr = append(start.Attr, xml.Attr{
+			Name: xml.Name{
+				Local: "plugin",
+			},
+			Value: "svn@2.4.0", // TODO whats the right SVN plugin text?
+		})
+		err := e.EncodeElement(s, start)
+		if err != nil {
+			return err
+		}
+	default:
+		log.Error().Msgf("Unrecognised SCM class (%+v)", s)
+	}
+	return nil
+}
+
+// JobToXml converts the given JobItem into XML
+func JobToXml(jobItem JobItem) ([]byte, error) {
+	if jobItem.MavenJobItem != nil {
+		return xml.Marshal(jobItem.MavenJobItem)
+	} else if jobItem.PipelineJobItem != nil {
+		return xml.Marshal(jobItem.PipelineJobItem)
+	}
+	return nil, errors.Errorf("unsupported JobItem type (%+v)", jobItem)
 }

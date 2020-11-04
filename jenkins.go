@@ -4,13 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"github.com/pkg/errors"
 )
 
 type HTTPStatusError struct {
@@ -176,7 +178,55 @@ func (jenkins *Jenkins) getXml(path string, params url.Values, body interface{})
 	return jenkins.parseXmlResponse(resp, body)
 }
 
+func (jenkins *Jenkins) parseXmlResponseWithWrapperElement(resp *http.Response, body interface{}, rootElementName string) (err error) {
+	defer resp.Body.Close()
+
+	if body == nil {
+		return
+	}
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+
+	xmlText := strings.TrimSpace(string(data))
+	if strings.Index(xmlText, "<?") == 0 {
+		idx := strings.Index(xmlText, "?>")
+		if idx < 0 {
+			return errors.New("could not find matching '?>' characters to strip the XML pragma!")
+		}
+		xmlText = xmlText[idx+2:]
+	}
+
+	wrappedDoc := "<" + rootElementName + ">\n" + xmlText + "\n</" + rootElementName + ">"
+
+	return xml.Unmarshal([]byte(wrappedDoc), body)
+}
+
+func (jenkins *Jenkins) getConfigXml(path string, params url.Values, body interface{}) (err error) {
+	requestUrl := jenkins.buildUrl(path, params)
+	req, err := http.NewRequest("GET", requestUrl, nil)
+	if err != nil {
+		return
+	}
+
+	resp, err := jenkins.sendRequest(req)
+	if err != nil {
+		return
+	}
+	// lets add a dummy item wrapper xml to make the xml parsing easier
+	return jenkins.parseXmlResponseWithWrapperElement(resp, body, "item")
+}
+
 func (jenkins *Jenkins) post(path string, params url.Values, body interface{}) (err error) {
+	_, err = jenkins.postForResponse(path, params, body)
+
+	return err
+}
+
+// Same behaviour as post(), but the http response is returned.
+func (jenkins *Jenkins) postForResponse(path string, params url.Values, body interface{}) (resp *http.Response, err error) {
 	requestUrl := jenkins.buildUrl(path, params)
 	req, err := http.NewRequest("POST", requestUrl, nil)
 	if err != nil {
@@ -184,19 +234,21 @@ func (jenkins *Jenkins) post(path string, params url.Values, body interface{}) (
 	}
 
 	if _, err := jenkins.checkCrumb(req); err != nil {
-		return err
+		return
 	}
 
-	resp, err := jenkins.sendRequest(req)
+	resp, err = jenkins.sendRequest(req)
 	if err != nil {
 		return
 	}
-	if !(200 <= resp.StatusCode && resp.StatusCode <= 299) {
-		return errors.New(fmt.Sprintf("error: HTTP POST returned status code %d (expected 2xx)", resp.StatusCode))
+
+	if !(resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) {
+		return nil, errors.New(fmt.Sprintf("error: HTTP POST returned status code %d (expected 2xx)", resp.StatusCode))
 	}
 
-	return jenkins.parseResponse(resp, body)
+	return resp, jenkins.parseResponse(resp, body)
 }
+
 func (jenkins *Jenkins) postXml(path string, params url.Values, xmlBody io.Reader, body interface{}) (err error) {
 	requestUrl := jenkins.baseUrl + path
 	if params != nil {
@@ -242,9 +294,14 @@ func (jenkins *Jenkins) GetJob(name string) (job Job, err error) {
 	return
 }
 
-//GetJobConfig returns a maven job, has the one used to create Maven job
+// GetJobUrl returns the URL path for the job with the specified name.
+func (jenkins *Jenkins) GetJobURLPath(name string) string {
+	return fmt.Sprintf("/job/%s", name)
+}
+
+// GetJobConfig returns a maven job, has the one used to create Maven job
 func (jenkins *Jenkins) GetJobConfig(name string) (job MavenJobItem, err error) {
-	err = jenkins.getXml(fmt.Sprintf("/job/%s/config.xml", name), nil, &job)
+	err = jenkins.getConfigXml(fmt.Sprintf("/job/%s/config.xml", name), nil, &job)
 	return
 }
 
@@ -273,17 +330,40 @@ func (jenkins *Jenkins) GetLastBuildByJobId(jobId string) (build Build, err erro
 }
 
 // Create a new job
-func (jenkins *Jenkins) CreateJob(mavenJobItem MavenJobItem, jobName string) error {
-	mavenJobItemXml, _ := xml.Marshal(mavenJobItem)
-	reader := bytes.NewReader(mavenJobItemXml)
+func (jenkins *Jenkins) CreateJob(jobItem JobItem, jobName string) error {
+	jobItemXml, err := JobToXml(jobItem)
+	if err != nil {
+		return err
+	}
+	reader := bytes.NewReader(jobItemXml)
 	params := url.Values{"name": []string{jobName}}
 
 	return jenkins.postXml("/createItem", params, reader, nil)
 }
 
+// Update a job
+func (jenkins *Jenkins) UpdateJob(jobItem JobItem, jobName string) error {
+	jobItemXml, err := JobToXml(jobItem)
+	if err != nil {
+		return err
+	}
+	reader := bytes.NewReader(jobItemXml)
+	params := url.Values{"name": []string{}}
+
+	return jenkins.postXml(jenkins.GetJobURLPath(jobName), params, reader, nil)
+}
+
+// Remove a job
+func (jenkins *Jenkins) RemoveJob(jobName string) error {
+	reader := bytes.NewReader([]byte{})
+	params := url.Values{}
+	jobUrl := jenkins.GetJobURLPath(jobName) + "/doDelete"
+	return jenkins.postXml(jobUrl, params, reader, nil)
+}
+
 // Delete a job
 func (jenkins *Jenkins) DeleteJob(job Job) error {
-	return jenkins.post(fmt.Sprintf("/job/%s/doDelete", job.Name), nil, nil)
+	return jenkins.post(fmt.Sprintf("%s/doDelete", job.Url), nil, nil)
 }
 
 // Add job to view
@@ -303,12 +383,46 @@ func (jenkins *Jenkins) CreateView(listView ListView) error {
 
 // Create a new build for this job.
 // Params can be nil.
-func (jenkins *Jenkins) Build(job Job, params url.Values) error {
+//
+// If the build was successfully started, the first response value will be the
+// Queue ID of the new build - or -1 if it could not be read.
+func (jenkins *Jenkins) Build(job Job, params url.Values) (int, error) {
+	var path string
 	if hasParams(job) {
-		return jenkins.post(fmt.Sprintf("%s/buildWithParameters", job.Url), params, nil)
+		path = fmt.Sprintf("%s/buildWithParameters", job.Url)
 	} else {
-		return jenkins.post(fmt.Sprintf("%s/build", job.Url), params, nil)
+		path = fmt.Sprintf("%s/build", job.Url)
 	}
+
+	resp, err := jenkins.postForResponse(path, params, nil)
+	if err != nil {
+		return -1, err
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		return -1, errors.Errorf("received unexpected HTTP status code: %d", resp.StatusCode)
+	}
+
+	// Status is 201 CREATED - this means Jenkins has included a location
+	// header pointing to the new build's position in the queue.
+	//
+	// Parse out the queue ID and return it to the user.
+	location := resp.Header.Get("Location")
+	if len(location) == 0 {
+		return -1, errors.New("Could not parse location header: none set")
+	}
+
+	split := strings.Split(location, "/")
+	if len(split) < 2 {
+		return -1, errors.New("Could not parse location header: path not understood")
+	}
+
+	queueItemId, err := strconv.Atoi(split[len(split)-2])
+	if err != nil {
+		return -1, errors.New("Could not parse location header: invalid integer")
+	}
+
+	return queueItemId, nil
 }
 
 // Get the console output from a build.
@@ -373,7 +487,7 @@ func (jenkins *Jenkins) SetBuildDescription(build Build, description string) err
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		return fmt.Errorf("Unexpected response: expected '200' but received '%d'", res.StatusCode)
+		return errors.Errorf("unexpected response: expected '200' but received '%d'", res.StatusCode)
 	}
 
 	return nil
