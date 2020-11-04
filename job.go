@@ -65,6 +65,18 @@ type Build struct {
 	ChangeSets []ScmChangeSet `json:"changeSets"` // pipeline
 }
 
+func (b Build) GetActionParameterByName(name string) *Parameter {
+	for _, a := range b.Actions {
+		for _, p := range a.Parameter {
+			if p.Name == name {
+				return p
+			}
+		}
+	}
+
+	return nil
+}
+
 type UpstreamCause struct {
 	ShortDescription string `json:"shortDescription"`
 	UpstreamBuild    int    `json:"upstreamBuild"`
