@@ -226,20 +226,20 @@ func (jenkins *Jenkins) post(path string, params url.Values, body interface{}) (
 }
 
 // Same behaviour as post(), but the http response is returned.
-func (jenkins *Jenkins) postForResponse(path string, params url.Values, body interface{}) (resp *http.Response, err error) {
+func (jenkins *Jenkins) postForResponse(path string, params url.Values, body interface{}) (*http.Response, error) {
 	requestUrl := jenkins.buildUrl(path, params)
 	req, err := http.NewRequest("POST", requestUrl, nil)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	if _, err := jenkins.checkCrumb(req); err != nil {
-		return
+		return nil, err
 	}
 
-	resp, err = jenkins.sendRequest(req)
+	resp, err := jenkins.sendRequest(req)
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	if !(resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices) {

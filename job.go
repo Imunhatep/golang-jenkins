@@ -2,7 +2,6 @@ package gojenkins
 
 import (
 	"encoding/xml"
-	"fmt"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog/log"
@@ -309,8 +308,8 @@ type LocalBranch struct {
 	LocalBranch string `xml:"localBranch"`
 }
 
-//UnmarshalXML implements xml.UnmarshalXML intrface
-//Decode between multiple types of Scm. for now only SVN is supported
+// UnmarshalXML implements xml.UnmarshalXML interface
+// Decode between multiple types of Scm.
 func (iscm *Scm) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	for _, v := range start.Attr {
 		if v.Name.Local == "class" {
@@ -378,7 +377,7 @@ func (iscm *Scm) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 			return err
 		}
 	default:
-		log.Error().Msgf("Unrecognised SCM class (%+v)", s)
+		log.Error().Msgf("unrecognised SCM class (%+v)", s)
 	}
 	return nil
 }
